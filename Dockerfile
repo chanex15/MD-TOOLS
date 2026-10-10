@@ -1,31 +1,18 @@
 # syntax=docker/dockerfile:1
-#
-# MD-TOOL — production image.
 
 FROM node:20-bookworm-slim
-
-ARG TARGETARCH
 
 ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0
 
-# Added python3 here so yt-dlp can execute YouTube player JS extractors
+# Install system dependencies, ffmpeg, and python3-pip
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3 \
+ && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3 python3-pip \
  && rm -rf /var/lib/apt/lists/*
 
-# Pin the architecture-specific yt-dlp asset.
-RUN set -eux; \
-    case "\${TARGETARCH:-amd64}" in \
-      arm64) asset="yt-dlp_linux_aarch64" ;; \
-      *)     asset="yt-dlp_linux" ;; \
-    esac; \
-    curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/\${asset}" \
-      -o /usr/local/bin/yt-dlp; \
-    chmod +x /usr/local/bin/yt-dlp; \
-    yt-dlp --version; \
-    ffmpeg -version | head -1
+# Install the latest stable yt-dlp via pip (handles architectures automatically)
+RUN pip3 install --no-cache-dir --upgrade yt-dlp
 
 WORKDIR /app
 
