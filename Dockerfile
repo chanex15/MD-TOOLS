@@ -11,8 +11,11 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3 python3-pip \
  && rm -rf /var/lib/apt/lists/*
 
-# Install the latest stable yt-dlp via pip (handles architectures automatically)
-RUN pip3 install --no-cache-dir --break-system-packages --upgrade yt-dlp
+# Install the latest stable yt-dlp via pip.
+# --break-system-packages is required on Debian 12 (PEP 668 "externally managed" Python).
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade yt-dlp \
+ && yt-dlp --version \
+ && ffmpeg -version | head -1
 
 WORKDIR /app
 
