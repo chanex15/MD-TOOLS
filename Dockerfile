@@ -12,7 +12,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Install the latest stable yt-dlp via pip (handles architectures automatically)
-RUN pip3 install --no-cache-dir --upgrade yt-dlp
+RUN pip3 install --no-cache-dir --break-system-packages --upgrade yt-dlp
 
 WORKDIR /app
 
