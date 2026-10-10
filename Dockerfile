@@ -1,14 +1,6 @@
 # syntax=docker/dockerfile:1
 #
 # MD-TOOL — production image.
-#
-# A container host (Fly.io, Render, Railway, a VPS) is required: the app spawns
-# yt-dlp and ffmpeg child processes and runs conversions that take minutes, so
-# it cannot run on a serverless platform such as Vercel.
-#
-# Both binaries are installed into the image:
-#   * ffmpeg  — from Debian, and it brings ffprobe with it.
-#   * yt-dlp  — the standalone release build, so no Python runtime is needed.
 
 FROM node:20-bookworm-slim
 
@@ -18,18 +10,18 @@ ENV NODE_ENV=production \
     PORT=3000 \
     HOST=0.0.0.0
 
+# Added python3 here so yt-dlp can execute YouTube player JS extractors
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg \
+ && apt-get install -y --no-install-recommends ca-certificates curl ffmpeg python3 \
  && rm -rf /var/lib/apt/lists/*
 
-# Pin the architecture-specific yt-dlp asset. amd64 and arm64 are the builds
-# that ship as bare binaries (armv7 is a .zip) and the ones container hosts use.
+# Pin the architecture-specific yt-dlp asset.
 RUN set -eux; \
-    case "${TARGETARCH:-amd64}" in \
+    case "\${TARGETARCH:-amd64}" in \
       arm64) asset="yt-dlp_linux_aarch64" ;; \
       *)     asset="yt-dlp_linux" ;; \
     esac; \
-    curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}" \
+    curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/\${asset}" \
       -o /usr/local/bin/yt-dlp; \
     chmod +x /usr/local/bin/yt-dlp; \
     yt-dlp --version; \
