@@ -17,6 +17,9 @@ primary_region = "iad"
 [env]
   PORT = "3000"
   HOST = "0.0.0.0"
+  # Fly fronts the app with a local proxy, so trust exactly one hop: without it
+  # req.ip is the proxy for every visitor and they all share one rate-limit bucket.
+  TRUST_PROXY = "1"
 
 [http_service]
   internal_port = 3000

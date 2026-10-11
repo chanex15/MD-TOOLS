@@ -50,8 +50,8 @@ memory — none of which fits a serverless platform.
 > freeze after the `202` response so the background job never completes, and
 > don't keep the in-memory job map or the SSE connection across invocations.
 
-The `Dockerfile` installs both binaries (yt-dlp as a standalone build, so no
-Python is needed) and runs the server unchanged:
+The `Dockerfile` installs both binaries — `ffmpeg` from Debian, `yt-dlp` from
+PyPI via `pip` — and runs the server unchanged:
 
 ```bash
 docker build -t md-tool .
@@ -66,11 +66,62 @@ fly deploy
 fly secrets set SITE_URL="https://<your-app>.fly.dev"   # canonical/OG/sitemap origin
 ```
 
-`fly.toml` ships with an `/api/health` check and `force_https = true`. Because
-jobs live in memory and progress is streamed with SSE, **run a single machine**
+`fly.toml` ships with an `/api/health` check, `force_https = true` and
+`TRUST_PROXY=1` (the platform fronts the app with a local proxy, so without it
+every visitor shares one rate-limit bucket). Because jobs live in memory and
+progress is streamed with SSE, **run a single machine**
 (`auto_stop_machines = false` is already set) — a second instance would not see
 the first one's jobs. Any Docker host (Render, Railway, a VPS) works the same
 way; only `fly.toml` is Fly-specific.
+
+### Downloads work locally but fail on the server
+
+This is almost always **IP reputation, not a bug**. YouTube and TikTok decide
+whether to serve a video from the requester's IP address *before* they look at
+anything else, so a residential address (your laptop) is served while a
+datacenter address (Fly, Render, a VPS) gets `Sign in to confirm you're not a
+bot`, or a captcha. TikTok often answers with a login wall on the same
+addresses. yt-dlp cannot argue its way out of a blocked IP, so you have to give
+it an identity or a different egress — these switches are inert unless set, so
+local runs and the test suite are unaffected.
+
+| Variable | Effect |
+| --- | --- |
+| `YTDLP_COOKIES` | Path to a Netscape-format cookie jar (`--cookies`) |
+| `YTDLP_COOKIES_B64` | The same jar base64-encoded, for hosts where a secret is the only config channel — decoded once to `$TMPDIR/md-tool/cookies.txt` |
+| `YTDLP_PROXY` | Egress via a proxy, e.g. `http://user:pass@host:port` (`--proxy`) |
+| `YTDLP_USER_AGENT` | Override the user agent (`--user-agent`); TikTok in particular serves a stub to unknown clients |
+| `YTDLP_FORCE_IPV4` | `1` to add `--force-ipv4`, for container networks with broken IPv6 egress |
+| `YTDLP_EXTRACTOR_ARGS` | Raw escape hatch, e.g. `youtube:player_client=web_safari` |
+
+Redeploy first, so the image picks up the current yt-dlp:
+
+```bash
+fly deploy      # Fly
+# Render/Railway rebuild on push, or use the dashboard's "Deploy" button
+```
+
+Then supply the configuration. On Fly:
+
+```bash
+fly secrets set YTDLP_COOKIES_B64="$(base64 -w0 cookies.txt)"
+fly secrets set YTDLP_PROXY="http://user:pass@host:port"
+fly logs                                      # the app reports the source's own message
+```
+
+On **Render**, add `YTDLP_COOKIES_B64` (or `YTDLP_PROXY`) under *Environment*;
+Render also supports *Secret Files*, in which case mount the jar and point
+`YTDLP_COOKIES` at it instead. On **Railway**, `railway variables --set
+YTDLP_COOKIES_B64=...`. Wherever you deploy, also set `TRUST_PROXY=1`,
+`SITE_URL` and — if the container's IPv6 egress is broken — `YTDLP_FORCE_IPV4=1`.
+
+A cookie jar exported from **your own signed-in browser** (a "cookies.txt"
+extension, in Netscape format) is the cheapest fix; it is also the only one that
+works for TikTok's login walls. Be aware that YouTube's bot check is decided by
+IP reputation *before* cookies are considered, so on a cloud address cookies help
+often but not always — a proxy with a residential/ISP egress is the durable fix.
+Cookies expire, and YouTube refuses some videos to newly created accounts, so
+expect to refresh them.
 
 ## SEO & deployment
 
@@ -92,7 +143,8 @@ Set these before deploying:
 | `SITE_URL` | `http://localhost:$PORT` | Origin used by canonical/OG tags, the sitemap and robots.txt |
 | `GOOGLE_SITE_VERIFICATION` | — | Search Console token; injected into `<head>` when set |
 
-`/index.html` 301-redirects to `/`, so the page has exactly one canonical URL.
+`/index.html` and `/index` both 301-redirect to `/`, so the page has exactly one
+canonical URL and the rendered origin can never be bypassed by a static hit.
 With an `https://` `SITE_URL` the app also sends `Strict-Transport-Security` and
 308-redirects requests whose `X-Forwarded-Proto` is `http`; both are inert on
 localhost.
@@ -210,11 +262,14 @@ response.
 | `INFO_TIMEOUT_MS` | `60000` | Metadata timeout |
 | `MAX_FILENAME_BYTES` | `120` | Attachment filename budget |
 | `YTDLP_PATH` / `FFMPEG_PATH` | `yt-dlp` / `ffmpeg` | Binary overrides |
+| `TRUST_PROXY` | unset (off) | Proxy hops to trust for the client IP, so rate limiting works behind a proxy. `1` matches Fly/Render/Railway; a subnet list is passed through |
+| `SITE_URL` / `GOOGLE_SITE_VERIFICATION` | — | see [SEO & deployment](#seo--deployment) |
+| `YTDLP_COOKIES` / `_B64` / `YTDLP_PROXY` / `YTDLP_USER_AGENT` / `YTDLP_FORCE_IPV4` / `YTDLP_EXTRACTOR_ARGS` | unset | see [Downloads work locally but fail on the server](#downloads-work-locally-but-fail-on-the-server) |
 
 ## Tests
 
 ```bash
-npm test          # 61 checks
+npm test          # 67 checks
 npm run check     # syntax-check every source file
 ```
 

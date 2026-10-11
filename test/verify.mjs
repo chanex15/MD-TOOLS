@@ -27,6 +27,7 @@ import {
   buildAttachmentName,
   contentDisposition,
   friendlyError,
+  networkArgs,
   sanitiseFilenameBase,
   summariseStderr,
 } from '../lib/downloader.js';
@@ -450,6 +451,24 @@ await test('the page is indexable, has one H1, canonical, OG and schema', async 
   assert.match(html, /"@type": "WebApplication"/, 'schema markup should be present');
 });
 
+await test('/index is not a second copy of the page and never serves the raw template', async () => {
+  const redirect = await fetch(`${BASE}/index`, { redirect: 'manual' });
+  assert.equal(redirect.status, 301, '/index should point at the canonical /');
+  assert.equal(redirect.headers.get('location'), '/');
+
+  // Following the redirect must produce the *rendered* page: serving the file
+  // from disk would leak the placeholder origin into canonical/OG tags.
+  const html = await (await fetch(`${BASE}/index`)).text();
+  assert.ok(
+    html.includes(`<link rel="canonical" href="${BASE}/" />`),
+    '/index must carry the configured origin'
+  );
+  assert.ok(
+    !html.includes('http://localhost:3000'),
+    'the placeholder origin must never reach a client'
+  );
+});
+
 await test('bad input is rejected before any job is created', async () => {
   const res = await fetch(`${BASE}/api/download?url=nope&format=mp3`);
   assert.equal(res.status, 400);
@@ -790,13 +809,66 @@ await test('common yt-dlp failures become clean, actionable messages', () => {
   );
   assert.equal(
     friendlyError('ERROR: Sign in to confirm you\u2019re not a bot'),
-    'The source is asking for a bot check. Try again later, or from a different network.'
+    'The source is asking for a bot check. This usually means the server\u2019s IP is blocked \u2014 set YTDLP_COOKIES or YTDLP_PROXY (see the README).'
+  );
+  assert.match(
+    friendlyError('ERROR: [TikTok] 123: Captcha challenge detected'),
+    /captcha/i,
+    'a captcha is reported as an IP problem, not a generic failure'
+  );
+  assert.match(
+    friendlyError('ERROR: [TikTok] 123: This video is only available for registered users'),
+    /signed-in session/i
   );
   assert.equal(
     friendlyError('ERROR: Unable to download webpage: HTTP Error 404: Not Found'),
     'That page could not be found (404).'
   );
   assert.equal(friendlyError('ERROR: Unsupported URL: https://x.test/'), "That link isn't a supported video URL.");
+});
+
+await test('blocked-IP escapes are opt-in and map to the right yt-dlp flags', async () => {
+  const KEYS = [
+    'YTDLP_COOKIES',
+    'YTDLP_COOKIES_B64',
+    'YTDLP_PROXY',
+    'YTDLP_USER_AGENT',
+    'YTDLP_FORCE_IPV4',
+    'YTDLP_EXTRACTOR_ARGS',
+  ];
+  const saved = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+
+  try {
+    for (const key of KEYS) delete process.env[key];
+    assert.deepEqual(await networkArgs(), [], 'nothing is added unless asked for');
+
+    process.env.YTDLP_PROXY = 'http://proxy.test:8080';
+    process.env.YTDLP_USER_AGENT = 'Mozilla/5.0 (test)';
+    process.env.YTDLP_FORCE_IPV4 = 'true';
+    process.env.YTDLP_EXTRACTOR_ARGS = 'youtube:player_client=web_safari';
+    assert.deepEqual(await networkArgs(), [
+      '--proxy', 'http://proxy.test:8080',
+      '--user-agent', 'Mozilla/5.0 (test)',
+      '--force-ipv4',
+      '--extractor-args', 'youtube:player_client=web_safari',
+    ]);
+
+    // A base64 cookie blob is materialised into a real, readable jar — the only
+    // shape that works when the sole config channel is an env secret.
+    delete process.env.YTDLP_PROXY;
+    delete process.env.YTDLP_USER_AGENT;
+    delete process.env.YTDLP_FORCE_IPV4;
+    delete process.env.YTDLP_EXTRACTOR_ARGS;
+    process.env.YTDLP_COOKIES_B64 = Buffer.from('# Netscape HTTP Cookie File\n').toString('base64');
+    const args = await networkArgs();
+    assert.equal(args[0], '--cookies');
+    assert.equal(fs.readFileSync(args[1], 'utf8'), '# Netscape HTTP Cookie File\n');
+  } finally {
+    for (const key of KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
 });
 
 await test('unrecognised errors are surfaced, never swallowed', () => {
@@ -860,6 +932,35 @@ await test('the rate limit does not apply to health checks', async () => {
       const res = await fetch(`${base}/api/health`);
       assert.equal(res.status, 200, 'health must stay reachable for monitoring');
     }
+  });
+});
+
+await test('the rate limiter keys on the real client behind a trusted proxy', async () => {
+  const hit = (base, ip) =>
+    fetch(`${base}/api/info?url=nope`, { headers: { 'X-Forwarded-For': ip } });
+
+  // TRUST_PROXY=1 (Fly/Render/Railway): every forwarded client gets its own
+  // budget, so one visitor cannot lock everyone else out.
+  await withTempServer({ RATE_LIMIT_MAX: '2', PORT: '3197', TRUST_PROXY: '1' }, async (base) => {
+    assert.equal((await hit(base, '203.0.113.9')).status, 400);
+    assert.equal((await hit(base, '203.0.113.9')).status, 400);
+    assert.equal((await hit(base, '203.0.113.9')).status, 429, 'the busy client should be limited');
+    assert.equal(
+      (await hit(base, '198.51.100.7')).status,
+      400,
+      'a different client must keep its own budget'
+    );
+  });
+
+  // Unset: the socket address wins, so a spoofed header buys no extra budget.
+  await withTempServer({ RATE_LIMIT_MAX: '2', PORT: '3196', TRUST_PROXY: '' }, async (base) => {
+    assert.equal((await hit(base, '203.0.113.9')).status, 400);
+    assert.equal((await hit(base, '198.51.100.7')).status, 400);
+    assert.equal(
+      (await hit(base, '203.0.113.9')).status,
+      429,
+      'X-Forwarded-For must be ignored when no proxy is trusted'
+    );
   });
 });
 

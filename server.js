@@ -76,8 +76,34 @@ const GOOGLE_SITE_VERIFICATION = process.env.GOOGLE_SITE_VERIFICATION || '';
 
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', false);
+
+/**
+ * How many proxy hops to trust when deriving the client address.
+ *
+ * Express only reads X-Forwarded-For when `trust proxy` is set, and trusting it
+ * unconditionally would let any client spoof its own address (or someone
+ * else's, to exhaust their budget). So it is opt-in and explicit:
+ *
+ *   unset      → the app is exposed directly; req.ip is the socket address.
+ *   TRUST_PROXY=1 → one front proxy (Fly.io, Render, Railway, nginx); hop count.
+ *   TRUST_PROXY=true, or a comma-separated subnet list → passed through as-is.
+ *
+ * Render/Railway/Fly all front the app with a local proxy, so without this every
+ * visitor shares a single rate-limit bucket.
+ */
+const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
+app.set('trust proxy', TRUST_PROXY);
 app.use(express.json({ limit: '16kb' }));
+
+/** @param {string | undefined} raw @returns {boolean | number | string[]} */
+function parseTrustProxy(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value || value.toLowerCase() === 'false' || value === '0') return false;
+  if (value.toLowerCase() === 'true') return true;
+  // A bare number is a hop count; Express would otherwise read "1" as a subnet.
+  if (/^\d+$/.test(value)) return Number(value);
+  return value.split(',').map((entry) => entry.trim()).filter(Boolean);
+}
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -619,12 +645,16 @@ app.get('/llms.txt', (_req, res) => {
     );
 });
 
-// Keep one canonical URL for the page rather than /index.html.
-app.get('/index.html', (_req, res) => res.redirect(301, '/'));
+// Keep one canonical URL for the page: both /index.html and /index land on /.
+app.get(['/index.html', '/index'], (_req, res) => res.redirect(301, '/'));
 
 app.get('/', sendIndex);
 
-app.use(express.static(publicDir, { index: false, extensions: ['html'] }));
+// No `extensions: ['html']` here: it resolved /index to the copy of
+// public/index.html on disk, which skipped renderIndex() and so served the
+// placeholder origin (http://localhost:3000) instead of SITE_URL. The SPA
+// fallback below already covers any other path.
+app.use(express.static(publicDir, { index: false }));
 
 // SPA fallback for any non-API GET.
 app.use((req, res, next) => {
